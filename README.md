@@ -30,7 +30,7 @@ python3 mover.py --config=<config_file>
 
 ## Config file
 
-```json
+```json5
 {
   "main": {
     // Optional
