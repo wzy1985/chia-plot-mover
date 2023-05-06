@@ -1,6 +1,6 @@
 # Chia Plot Mover
 
-Automatically moves Chia plots to a specified location.
+Automatically moves `Chia plots` to a specified location.
 
 If you have multiple hard drives, this little tool will automatically handle all plot files and move them to your specified destination.
 
@@ -14,7 +14,7 @@ If you have multiple hard drives, this little tool will automatically handle all
 
 ## Requirements
 
-Requires Python 3.7 or later versions.
+Requires `Python` 3.7 or later versions on `Linux`.
 
 ## Install
 

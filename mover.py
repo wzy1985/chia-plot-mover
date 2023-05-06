@@ -43,39 +43,37 @@ class Mover:
         return
 
     def logger_init(self):
-        logger = logging.getLogger('plotter-manager')
+        logger = logging.getLogger('chia-plot-mover')
         logger.setLevel(logging.INFO)
         # STDOUT
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(stdout_handler)
         # FILE
-        # file = logging.FileHandler(self.config['main']['log_dir'] + '/plotter-manager.log', 'a+', encoding="utf-8")
+        # file = logging.FileHandler(self.config['main']['log_dir'] + '/chia-plot-mover.log', 'a+', encoding="utf-8")
         # file.setFormatter(formatter)
         # logger.addHandler(file)
         self.logger = logger
         self.logger.info("chia-plot-mover was startup, PID: " + str(os.getpid()))
 
-    # 加载配置文件
     def load_config(self, config_file):
         try:
-            # 加载配置文件
             with open(config_file, mode='r') as fp:
                 config = json.loads(fp.read())
-            # 解析配置
+            # Parsing configuration
             # -------------- main --------------
             _main = {}
-            # 选填: session_file (default: /tmp/chia-plot-mover.session)
+            # Optional: session_file (default: /tmp/chia-plot-mover.session)
             if 'session_file' not in config['main'] or not config['main']['session_file'].strip():
                 _main['session_file'] = '/tmp/chia-plot-mover.session'
             else:
                 _main['session_file'] = config['main']['session_file'].strip()
-            # 选填: lock_file (default: /var/run/chia-plot-mover.lock)
+            # Optional: lock_file (default: /var/run/chia-plot-mover.lock)
             if 'lock_file' not in config['main'] or not config['main']['lock_file'].strip():
                 _main['lock_file'] = '/var/run/chia-plot-mover.lock'
             else:
                 _main['lock_file'] = config['main']['lock_file'].strip()
-            # 选填: dest_file_expiration_time (default: 0)
+            # Optional: dest_file_expiration_time (default: 0)
             if 'dest_file_expiration_time' not in config['main'] or not config['main']['dest_file_expiration_time'].strip():
                 _main['dest_file_expiration_time'] = 0
             else:
@@ -85,55 +83,55 @@ class Mover:
             _source = []
             for k in range(len(config['source'])):
                 value = config['source'][k]
-                # 必填: name
+                # Required: name
                 if 'name' not in value or not value['name'].strip():
-                    raise Exception('source[' + str(k) + '].name 必须填写名称!')
+                    raise Exception('source[' + str(k) + '].name: This field is required.')
                 name = value['name'].rstrip('/')
-                # 必填: dir
+                # Required: dir
                 path = os.path.abspath(value['dir'])
                 if not os.path.isdir(path):
-                    raise Exception('source[' + str(k) + '].dir 目录 ' + value['dir'] + ' 不存在或不是目录!')
+                    raise Exception('source[' + str(k) + '].dir: The directory ' + value['dir'] + ' does not exist or is not a directory.')
                 _source.append({
                     'name': name,
                     'dir': path,
                 })
             if len(_source) == 0:
-                raise Exception('source 必须配置至少1个!')
+                raise Exception('At least 1 source must be configured.')
             self.config['source'] = _source
             # -------------- dest --------------
             _dest = []
             for k in range(len(config['dest'])):
                 value = config['dest'][k]
-                # 必填: name
+                # Required: name
                 if 'name' not in value or not value['name'].strip():
-                    raise Exception('dest[' + str(k) + '].name 必须填写名称!')
+                    raise Exception('dest[' + str(k) + '].name: This field is required.')
                 name = value['name'].strip()
-                # 必填: dir
+                # Required: dir
                 path = os.path.abspath(value['dir'])
                 if not os.path.isdir(path):
-                    raise Exception('dest[' + str(k) + '].dir 目录 ' + value['dir'] + ' 不存在或不是目录!')
+                    raise Exception('dest[' + str(k) + '].dir: The directory ' + value['dir'] + ' does not exist or is not a directory.')
                 _dest.append({
                     'name': name,
                     'dir': path,
                 })
             if len(_dest) == 0:
-                raise Exception('dest 必须配置至少1个!')
+                raise Exception('At least 1 destination must be configured.')
             self.config['dest'] = _dest
         except Exception as e:
-            print('line %d, 配置错误: %s' % (e.__traceback__.tb_lineno, str(e).strip("'")))
+            print('line %d, Configuration error: %s' % (e.__traceback__.tb_lineno, str(e).strip("'")))
             exit(2)
         return
 
-    # 主流程
+    # Main process
     def run(self):
-        # 扫描目的地
+        # Scanning destination
         self.scan_dest()
         while True:
-            # 刷新 session
+            # Refreshing session
             self.session_refresh()
-            # auto move
+            # Auto move
             self.auto_move()
-            # sleep
+            # Sleep
             time.sleep(10)
 
     def session_load(self):
@@ -167,9 +165,9 @@ class Mover:
                 result[dest['dir']].append((path, stat))
         self.dest_info = result
 
-    # 刷新 session
+    # Refreshing session
     def session_refresh(self):
-        # 更新文件系统实时统计
+        # Updating real-time statistics of the file system
         fs_available = {}
         fp = subprocess.Popen(
             "df -m | awk '{print $1,$4}'",
@@ -186,7 +184,7 @@ class Mover:
             (filesystem, available) = line.strip().split(' ')
             fs_available[filesystem] = int(available)
         self.session_set('filesystem_available', fs_available)
-        # 扫描全部来源文件
+        # Scanning all source files
         tmp = {}
         for k in range(len(self.config['source'])):
             source = self.config['source'][k]
@@ -199,7 +197,7 @@ class Mover:
                 if basename[:1] == '.' or suffix != '.plot':
                     continue
                 tmp[k].append((file, math.ceil(os.path.getsize(file)/1024/1024)))
-        # 交叉合并来源数据
+        # Cross-merging source lists
         source_list = copy.deepcopy(self.session['source'])
         source_list_map = list(map(lambda v: v[0], source_list))
         j = 0
@@ -216,20 +214,20 @@ class Mover:
             if not is_continue:
                 break
             j += 1
-        # 从session.source中剔除已完成或文件不存在的数据
+        # Remove data from session.source that has already been completed or does not exist
         for k in range(len(source_list)):
             file = source_list[k][0]
             if not os.path.isfile(file):
                 source_list[k] = None
         source_list = list(filter(None, source_list))
-        # 更新session
+        # Update session
         self.session_set('source', source_list)
         return
 
     def auto_move(self):
         source_list = copy.deepcopy(self.session['source'])
         fs_available = copy.deepcopy(self.session['filesystem_available'])
-        # 获取所有待传输的来源
+        # Retrieve all sources waiting to be transmitted
         workers_source = list(map(lambda v: v['source'][0], self.session['workers'].values()))
         for k in range(len(source_list)):
             if source_list[k][0] in workers_source:
@@ -237,7 +235,7 @@ class Mover:
         source_list = list(filter(None, source_list))
         if len(source_list) == 0:
             return
-        # 检查是否存在传输异常未完成的临时文件
+        # Check for the existence of temporary files for incomplete transfers due to transmission errors
         workers_dest = list(map(lambda v: v['dest'], self.session['workers'].values()))
         lost = []
         for k in range(len(self.config['dest'])):
@@ -251,7 +249,7 @@ class Mover:
                     dest_file = os.path.join(dest['dir'], filename[1:-7])
                     if dest_file not in workers_dest:
                         lost.append(dest_file)
-        # 如果存在未完成任务，则优先续传
+        # If there are unfinished tasks, prioritize resuming transfers
         if len(lost) > 0:
             dest_file = lost.pop(0)
             for source in source_list:
@@ -263,7 +261,7 @@ class Mover:
                     )
                     threading.Thread(target=self.move_worker, args=(source, dest_file), daemon=True).start()
                     return
-        # 统计可用目标
+        # Count available destinations
         fs_used = []
         for _, worker in self.session['workers'].items():
             (_, size) = worker['source']
@@ -271,10 +269,10 @@ class Mover:
             fs_available[fs] -= size
             if fs not in fs_used:
                 fs_used.append(fs)
-        # 生成任务目标
+        # Generate task destinations
         source = source_list.pop(0)
         (source_file, source_size) = source
-        # 优先生成新增任务
+        # Prioritize generating move tasks
         for k in range(len(self.config['dest'])):
             dest = self.config['dest'][k]
             fs = get_filesystem_by_path(dest['dir'])
@@ -289,7 +287,7 @@ class Mover:
             )
             threading.Thread(target=self.move_worker, args=(source, dest_file), daemon=True).start()
             return
-        # 如果目的地磁盘全满，则生成替换任务
+        # If the destination disk is full, generate replacement tasks
         if self.config['main']['dest_file_expiration_time'] > 0:
             for (dir, flist) in self.dest_info.items():
                 for k in range(len(flist)):
@@ -299,7 +297,7 @@ class Mover:
                     fs = get_filesystem_by_path(dir)
                     if fs in fs_used:
                         continue
-                    # 先删除
+                    # Delete first
                     timestruct = time.localtime(stat.st_mtime)
                     self.logger.info(
                         'remove expiration plot: %s , mtime: %s' %
@@ -308,10 +306,10 @@ class Mover:
                     os.remove(path)
                     del self.dest_info[dir][k]
                     fs_available[fs] += stat.st_size / 1024 / 1024
-                    # 删除完空间依然不够，则继续循环删除
+                    # If there is still not enough space after deletion, continue deleting in a loop
                     if source_size > (fs_available[fs] + stat.st_size/1024/1024):
                         continue
-                    # 再新增
+                    # Move afterwards
                     dest_file = os.path.join(dir, os.path.basename(source_file))
                     self.logger.info(
                         'new task in mover. plot: %s , path: %s/ -> %s/' %
@@ -333,7 +331,7 @@ class Mover:
             return workers
         self.session_set('workers', update_fn=update_fn)
         begin_time = datetime.datetime.now()
-        # 复制文件
+        # Copy file
         (source_file, source_size) = source
         copy_once_size = 4 * 1024 * 1024
         if not os.path.isfile(dest):
@@ -348,12 +346,12 @@ class Mover:
         else:
             dest_tmp = dest
         end_copy_time = datetime.datetime.now()
-        # 快速校验文件一致性
+        # Quickly verify file consistency
         try:
             size1 = os.path.getsize(source_file)
             size2 = os.path.getsize(dest_tmp)
             if size1 != size2:
-                raise Exception('不一致 1')
+                raise Exception('File move verification failed. The source and target files are of different sizes.')
             verify_count = 200
             verify_once_size = 1 * 1024 * 1024
             hash1 = hashlib.md5()
@@ -368,18 +366,18 @@ class Mover:
             hex1 = hash1.hexdigest()
             hex2 = hash2.hexdigest()
             if hex1 != hex2:
-                raise Exception('不一致 2')
+                raise Exception('File move verification failed. The source and target files have differences in content.')
             end_verify_time = datetime.datetime.now()
-            # 复制完成
+            # Copy completed
             if dest_tmp != dest:
                 os.rename(dest_tmp, dest)
             os.remove(source_file)
-            # 更新session
+            # Update session
             def update_fn(workers):
                 workers.pop(threading.get_ident())
                 return workers
             self.session_set('workers', update_fn=update_fn)
-            # 输出日志
+            # Output log
             copy_usetime_txt = usetime_to_text(begin_time, end_copy_time)
             copy_speed = source_size / (end_copy_time - begin_time).total_seconds()
             verify_usetime_txt = usetime_to_text(end_copy_time, end_verify_time)
@@ -405,7 +403,7 @@ class Mover:
             try:
                 procinfo = psutil.Process(pid)
                 if procinfo:
-                    self.logger.error('当前已经有一个管理进程在运行中，PID=' + pid)
+                    self.logger.error('There is already a Mover process running with PID=' + pid)
                     exit(2)
             except Exception:
                 pass
