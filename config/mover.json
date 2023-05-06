@@ -1,0 +1,34 @@
+{
+  "main": {
+    "session_file": "/tmp/chia-plot-mover.session",
+    "lock_file": "/tmp/chia-plot-mover.lock"
+  },
+  "source": [
+    {
+      "name": "ssd0",
+      "dir": "/mnt/ssd0/plot"
+    },
+    {
+      "name": "ssd1",
+      "dir": "/mnt/ssd1/plot"
+    }
+  ],
+  "dest": [
+    {
+      "name": "hdd0",
+      "dir": "/mnt/hdd0/plot"
+    },
+    {
+      "name": "hdd1",
+      "dir": "/mnt/hdd1/plot"
+    },
+    {
+      "name": "hdd2",
+      "dir": "/mnt/hdd2/plot"
+    },
+    {
+      "name": "hdd3",
+      "dir": "/mnt/hdd3/plot"
+    }
+  ]
+}
