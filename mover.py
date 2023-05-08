@@ -307,7 +307,7 @@ class Mover:
                     del self.dest_info[dir][k]
                     fs_available[fs] += stat.st_size / 1024 / 1024
                     # If there is still not enough space after deletion, continue deleting in a loop
-                    if source_size > (fs_available[fs] + stat.st_size/1024/1024):
+                    if fs_available[fs] < source_size:
                         continue
                     # Move afterwards
                     dest_file = os.path.join(dir, os.path.basename(source_file))
