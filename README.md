@@ -34,16 +34,12 @@ python3 mover.py --config=<config_file>
 {
   "main": {
     // Optional
-    // File to store runtime context data.
-    "session_file": "/tmp/chia-plot-mover.session",
-    
-    // Optional
     "lock_file": "/tmp/chia-plot-mover.lock",
     
     // Optional
     // Once set, the script will automatically delete files older than
     // this time when the destination disk capacity is insufficient.
-    "dest_file_expiration_time": "2022-01-01 00:00:00"
+    "expiration_time": "2022-01-01 00:00:00"
   },
   "source": [
     {
@@ -60,7 +56,7 @@ python3 mover.py --config=<config_file>
       "dir": "/mnt/ssd1/plot"
     }
   ],
-  "dest": [
+  "destination": [
     {
       // Required
       // Name of the destination.
