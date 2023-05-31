@@ -1,0 +1,22 @@
+{
+  "main": {
+    "lock_file": "/tmp/mover.lock",
+    "expiration_time": "2023-05-18 15:00:00"
+  },
+  "source": [
+    {
+      "name": "in1",
+      "dir": "/Users/zhaoyuan/Downloads/chia/plot/in1"
+    },
+    {
+      "name": "in2",
+      "dir": "/Users/zhaoyuan/Downloads/chia/plot/in2"
+    }
+  ],
+  "destination": [
+    {
+      "name": "out1",
+      "dir": "/Users/zhaoyuan/Downloads/chia/plot/out1"
+    }
+  ]
+}
