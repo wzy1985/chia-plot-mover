@@ -39,7 +39,17 @@ python3 mover.py --config=<config_file>
     // Optional
     // Once set, the script will automatically delete files older than
     // this time when the destination disk capacity is insufficient.
-    "expiration_time": "2022-01-01 00:00:00"
+    "expiration_time": "2022-01-01 00:00:00",
+    
+    // Optional
+    // Log file path.
+    // Default: STDOUT
+    "log_file": "/tmp/mover.log",
+    
+    // Optional
+    // Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    // Default: INFO
+    "log_level": "INFO"
   },
   "source": [
     {

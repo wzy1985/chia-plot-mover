@@ -14,6 +14,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+import atexit
 
 
 class StopEventException(Exception):
@@ -23,70 +24,83 @@ class StopEventException(Exception):
 class Mover:
 
 	def __init__(self):
-		# Logger
-		self.logger = None
+		# Config
+		self.conf_lock_file = None
+		self.conf_expiration_time = None
+		self.conf_log_level = None
+		self.conf_log_file = None
+		self.conf_src = []
+		self.conf_dst = []
 
 		# Runtime
-		self.lock_file = None
-		self.expiration_time = None
-		self.src = []
-		self.dst = []
-		self.src_list = None
-		self.scanner = None
-		self.workers = []
-		self.stop_event = threading.Event()
+		self.logger = None
+		self.log_message_queue = []
 		self.mutex = multiprocessing.Lock()
+		self.workers = {}
+		self.stop_event = threading.Event()
+		self.filesystem_cache = {}
 
 		# 在主线程中设置信号处理程序
-		signal.signal(signal.SIGINT, self.signal_handler)
-		signal.signal(signal.SIGTERM, self.signal_handler)
+		signal.signal(signal.SIGINT, self._signal_handler)
+		signal.signal(signal.SIGTERM, self._signal_handler)
+
+		atexit.register(self._cleanup)
+
+		self._log("chia-plot-mover was startup, PID: " + str(os.getpid()))
 		return
 
-	def __del__(self):
-		self.lockfile_delete()
+	def _cleanup(self):
+		self._lockfile_delete()
+		while True:
+			try:
+				data = self.log_message_queue.pop(0)
+				print("{} - {} - {}".format(
+					datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+					logging.getLevelName(data[0]),
+					data[1]
+				))
+			except:
+				break
 		return
 
 	# 开始运行
 	def run(self):
 		# Lockfile
-		self.lockfile_create()
+		self._lockfile_create()
 
 		# 检查是否已经加载配置
-		if not self.lock_file:
-			self.log("Configuration not loaded, exiting...", logging.ERROR)
+		if not self.conf_lock_file:
+			self._log("Configuration not loaded, exiting...", logging.ERROR)
 			return
 
-		# 创建扫描线程
-		self.scanner = threading.Thread(target=self.scanner_thread)
-		self.scanner.start()
-		self.log("Scanner thread started.")
-
 		# 创建工作线程
-		for dst in self.dst:
-			worker_thread = threading.Thread(target=self.worker_thread, args=(dst,))
-			worker_thread.start()
-			self.workers.append(worker_thread)
-		self.log("Worker threads started.")
+		for dst in self.conf_dst:
+			self.workers[dst['dir'].resolve()] = {
+				'thread': threading.Thread(target=self._worker_thread, args=(dst,)),
+				'lock': threading.Lock(),
+				'conf_dst': dst,
+				'device': self._get_filesystem_by_path(dst['dir']),
+				'estimated_available_capacity': 0,
+				'status': 'init',  # init, idle, busy
+				'task': None,
+			}
+			self.workers[dst['dir'].resolve()]['thread'].start()
+
+		# 创建扫描线程
+		scanner = threading.Thread(target=self._scanner_thread)
+		scanner.start()
 
 		# 等待结束
-		for worker in self.workers:
-			worker.join()
-		self.log("Worker threads finished.")
+		scanner.join()
+		for worker in self.workers.values():
+			worker['thread'].join()
 
-		self.scanner.join()
-		self.log("Scanner thread finished.")
-
-		self.log("Exiting main thread.")
+		self._log("Exiting main thread.")
 		return
-
-	# 设置日志
-	def set_logger(self, logger):
-		self.logger = logger
-		return self
 
 	# 设置配置
 	def set_config(self, config_file):
-		def validate_src_dst(items, name) -> list:
+		def validate_src_dst(items, name):
 			if len(items) == 0:
 				raise Exception(f"{name} must be configured with at least one item each.")
 			result = []
@@ -107,227 +121,311 @@ class Mover:
 			config_path = Path(config_file)
 			with config_path.open() as f:
 				config = json.load(f)
-			self.log("Config loaded from {}.".format(config_path.resolve()), logging.INFO)
+			self._log("Config loaded: {}".format(config_path.resolve()), logging.INFO)
 			# Validate and update configuration
-			self.lock_file = Path(config.get('main').get('lock_file', '/var/run/mover-manager.lock'))
-			self.expiration_time = int(time.mktime(
+			self.conf_lock_file = Path(config.get('main').get('lock_file', '/var/run/mover.lock'))
+			self.conf_expiration_time = int(time.mktime(
 				time.strptime(config.get('main').get('expiration_time', '0'), '%Y-%m-%d %H:%M:%S')
 			) if config.get('main').get('expiration_time') else 0)
-			self.src = validate_src_dst(config.get('source', []), 'source')
-			self.dst = validate_src_dst(config.get('destination', []), 'destination')
+			self.conf_log_level = config.get('main').get('log_level', 'INFO').upper()
+			conf_log_file = config.get('main').get('log_file')
+			if conf_log_file:
+				self.conf_log_file = Path(conf_log_file)
+			self._init_logger()
+			self.conf_src = validate_src_dst(config.get('source', []), 'source')
+			self.conf_dst = validate_src_dst(config.get('destination', []), 'destination')
 		except FileNotFoundError:
-			self.log("Config file {} not found.".format(config_path.resolve()), logging.ERROR)
+			self._log("Config file {} not found.".format(config_path.resolve()), logging.ERROR)
 			exit(1)
 		except json.JSONDecodeError:
-			self.log("Config file {} is not a valid JSON file.".format(config_path.resolve()), logging.ERROR)
+			self._log("Config file {} is not a valid JSON file.".format(config_path.resolve()), logging.ERROR)
 			exit(1)
 		except Exception as e:
-			self.log("Config file {} is not valid: {}".format(config_path.resolve(), e), logging.ERROR)
+			self._log("Config file {} is not valid: {}".format(config_path.resolve(), e), logging.ERROR)
 			exit(1)
 		return self
 
-	# 扫描线程
-	def scanner_thread(self):
-
-		# self.src_list = [
-		# 	[Path('/home/plotter/plot/plot-1/plot-1.plot'), 108, 'ext4'],
-		# 	[Path('/home/plotter/plot/plot-1/plot-2.plot'), 108, 'ext4'],
-		# 	[Path('/Users/zhaoyuan/Downloads/chia/plot/in2/028.plot'), 108, 'ext4'],
-		# 	[Path('/Users/zhaoyuan/Downloads/chia/plot/in2/888.plot'), 108, 'ext4'],
-		# ]
-
-		while True:
+	# 设置日志
+	def _init_logger(self):
+		logger = logging.getLogger('chia-plot-mover')
+		# Log Level
+		log_level = logging.getLevelNamesMapping().get(self.conf_log_level, logging.INFO)
+		logger.setLevel(log_level)
+		self._log("Log level set to {}".format(logging.getLevelName(log_level)))
+		# Handler
+		handler = None
+		if self.conf_log_file is not None:
 			try:
-				with self.mutex:
-					src_list = copy.deepcopy(self.src_list) if self.src_list is not None else []
-				# 扫描新增文件
-				append_list = []
-				for src in self.src:
-					for v in sorted(src['dir'].glob('*.plot')):
-						if v.is_file() and not any(sublist['file'] == v for sublist in src_list):
-							append_list.append({
-								'file': v,
-								'size': v.stat().st_size,
-								'mtime': v.stat().st_mtime,
-								'fs': self.get_filesystem_by_path(v),
-								'status': 'idle'
-							})
-						self.check_stop_event()
-				# 扫描待删除文件
-				remove_list = []
-				for src in src_list:
-					if not src['file'].is_file():
-						remove_list.append(src)
-					self.check_stop_event()
-				# 更新源列表
-				with self.mutex:
-					if self.src_list is None:
-						self.src_list = []
-					for src in append_list:
-						if not any(sublist['file'] == src['file'] for sublist in self.src_list):
-							self.log("Found new plot file: {}".format(src['file'].resolve()), logging.INFO,
-									 method='Scanner')
-							self.src_list.append(src)
-						self.check_stop_event()
-					for src in remove_list:
-						if any(sublist['file'] == src['file'] for sublist in self.src_list):
-							self.log("Remove invalid plot file: {}".format(src['file'].resolve()), logging.INFO,
-									 method='Scanner')
-							self.src_list.remove(src)
-						self.check_stop_event()
-				# Sleep
-				for sec in range(10):
-					time.sleep(1)
-					self.check_stop_event()
-			except StopEventException:
-				self.log("Stop event received, exiting scanner thread.", logging.INFO, method='Scanner')
-				return
-			except Exception as e:
-				self.log("Exception in scanner thread: {}".format(e), logging.ERROR, method='Scanner')
-				self.log(traceback.format_exc(), logging.DEBUG, method='Scanner')
+				# 创建文件
+				if not self.conf_log_file.exists():
+					self.conf_log_file.touch()
+				handler = logging.FileHandler(self.conf_log_file.resolve(), 'a+', encoding="utf-8")
+			except:
+				self._log("Log file {} creation failed, using STDOUT.".format(self.conf_log_file.resolve()), logging.ERROR)
+				pass
+		if handler is None:
+			handler = logging.StreamHandler(sys.stdout)
+		handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+		logger.addHandler(handler)
+		self.logger = logger
+		return
 
-	# 工作线程
-	def worker_thread(self, dst):
-		try:
-			while True:
-				time.sleep(1)
-				self.check_stop_event()
-				# 生成一个待传任务
-				pending = None
-				src_item = None
-				if self.src_list is None:
-					continue
-				pending_list = [item for item in dst['dir'].glob('.*.plot.moving') if item.is_file()]
-				while True:
-					if len(pending_list) > 0:
-						pending = pending_list.pop(0)
-						with self.mutex:
-							for (k, item) in enumerate(self.src_list):
-								if item['file'].name == pending.name[1:-7]:
-									src_item = item
-									break
-						if src_item:
-							break
-						else:
-							pending.unlink()
-							pending = None
-					else:
-						break
-				if not pending:
-					# 获取一个相对空闲的源
-					'''
-					fs_statistics = {
-						'fs1': [传输中数量, [待传对象,待传对象,...]],
-						'fs2': [传输中数量, [待传对象,待传对象,...]],
-						'fs3': [传输中数量, [待传对象,待传对象,...]],
-						...
+	def _scan_incomplete_files(self):
+		incomplete_files = {}
+		for dst in self.conf_dst:
+			for file in dst['dir'].glob('.*.plot.moving'):
+				if file.is_file():
+					# 发现待续传文件
+					self._log(f"Found incomplete file: {file}", logging.INFO, method='Scanner')
+					incomplete_files[file] = {
+						'file': file,
+						'size': file.stat().st_size,
+						'last_modified': file.stat().st_mtime,
+						'conf_dst': dst,
 					}
-					'''
-					fs_statistics = {}
-					with self.mutex:
-						for item in self.src_list:
-							fs = item['fs']
-							statistics = fs_statistics.get(fs, [0, []])
-							if item['status'] == 'idle':
-								statistics[1].append(item)
-							else:
-								statistics[0] += 1
-							fs_statistics[fs] = statistics
-					if len(fs_statistics) == 0:
-						continue
-					# 过滤掉空列表项
-					fs_statistics = {key: value for key, value in fs_statistics.items() if value[1]}
-					if len(fs_statistics) == 0:
-						continue
-					# 找到传输中数量最小的项
-					min_item = min(fs_statistics.items(), key=lambda item: item[1][0])
-					# 获取列表的头部第一个值
-					src_item = min_item[1][1][0]
-					print(src_item)
-					pending = dst['dir'] / ('.' + src_item['file'].name + '.moving')
-				if not pending:
-					continue
-				# 准备磁盘空间
-				free_space = shutil.disk_usage(dst['dir']).free
-				if pending.is_file():
-					free_space += pending.stat().st_size
-				if free_space < src_item['size']:
-					for expired_file in (item for item in dst['dir'].glob('*.plot') if
-										 item.is_file() and item.stat().st_mtime < self.expiration_time):
-						self.log("Removing expired file: {}, mtime: {}".format(
-							expired_file.resolve(),
-							time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expired_file.stat().st_mtime))
-						), logging.INFO)
-						free_space += expired_file.stat().st_size
-						expired_file.unlink()
-						if free_space >= src_item['size']:
-							break
-				if free_space < src_item['size']:
-					# 如果磁盘已满并且没有可清理的文件，则清理掉正在传输的文件
-					if pending.suffix == '.plot.moving':
-						pending.unlink()
-					continue
-				# 开始传输
+		return incomplete_files
+
+	# 扫描来源文件
+	def _scan_source_files(self):
+		source_files = {}
+		for src in self.conf_src:
+			for file in sorted(src['dir'].glob('*.plot')):
+				if file.is_file():
+					source_files[file] = {
+						'file': file,
+						'size': file.stat().st_size,
+						'last_modified': file.stat().st_mtime,
+						'device': self._get_filesystem_by_path(src['dir']),
+						'conf_src': src,
+					}
+		return source_files
+
+	def _resume(self):
+		# 扫描全部待续传文件
+		incomplete_files = self._scan_incomplete_files()
+		# 扫描全部来源文件
+		source_files = self._scan_source_files()
+		# 续传
+		for dst_file, dst_item in incomplete_files.items():
+			src_item = None
+			# 寻找file对应的source_file
+			for src_file in source_files.keys():
+				if src_file.name == dst_file.name[1:-7]:
+					src_item = source_files[src_file]
+					break
+			# 删除无法续传的文件
+			if src_item is None:
+				dst_file.unlink()
+				continue
+			# 续传未完成的文件
+			dst_dir = dst_item['conf_dst']['dir'].resolve()
+			with self.mutex:
+				if self.workers[dst_dir]['status'] == 'idle':
+					self.workers[dst_dir]['status'] = 'busy'
+					self.workers[dst_dir]['task'] = src_item
+					# 发送续传任务
+					self._log(f"Send Resume task {dst_file} -> {self.workers[dst_dir]['conf_dst']['name']}",
+							 logging.DEBUG, method='Scanner')
+
+	def _scanner_thread(self):
+		self._log("Scanner thread started.", logging.INFO, method='Scanner')
+		try:
+			# 等待工作线程准备完毕
+			while True:
+				ready_count = 0
+				for worker in self.workers.values():
+					if worker['status'] == 'idle':
+						ready_count += 1
+				if ready_count == len(self.workers):
+					break
+				self._check_stop_event()
+				time.sleep(0.1)
+			# 续传
+			self._resume()
+			# 扫描线程主逻辑开始
+			history_src_files = []
+			sleep = 0
+			while True:
+				# 延迟
+				for _ in range(sleep):
+					self._check_stop_event()
+					time.sleep(1)
 				with self.mutex:
-					try:
-						src_item = next(item for item in self.src_list if item['file'].name == pending.name[1:-7])
-						src_item['status'] = 'moving'
-						src_file = src_item['file']
-					except StopIteration:
+					# 从最空闲的来源设备选取一个文件
+					dst_device_busy_list = []
+					src_moving_list = []
+					src_device_busyness_statistics = {}
+					for worker in self.workers.values():
+						if worker['status'] == 'busy':
+							src_device = worker['task']['device']
+							dst_device_busy_list.append(worker['device'])
+							src_moving_list.append(worker['task']['file'].resolve())
+							src_device_busyness_statistics[src_device] = src_device_busyness_statistics.get(src_device,
+																											0) + 1
+					src_items = []
+					for item in [v for v in self._scan_source_files().values() if
+								 v['file'].resolve() not in src_moving_list]:
+						item['sort'] = src_device_busyness_statistics.get(item['device'], 0)
+						src_items.append(item)
+						if item['file'].resolve() not in history_src_files:
+							self._log(f"Found new file: {item['file']}", logging.INFO, method='Scanner')
+					if len(src_items) == 0:
+						sleep = 10
 						continue
-				self.file_move(src_file, pending)
-				pending.rename(pending.parent / (pending.name[1:-7]))
-				with self.mutex:
-					self.src_list.remove(src_item)
+					history_src_files = [v['file'].resolve() for v in src_items]
+					src_items.sort(key=lambda x: x['sort'])
+					src_item = src_items[0]
+					# 选取一个空闲的目标设备
+					workers = [v for v in self.workers.values() if
+							   v['status'] == 'idle' and v['device'] not in dst_device_busy_list
+							   and v['estimated_available_capacity'] > src_item['size']]
+					if len(workers) == 0:
+						sleep = 10
+						continue
+					worker = workers[0]
+					# 发送任务
+					self._log(f"Send task: {src_item['file']} -> {worker['conf_dst']['name']}", logging.DEBUG,
+							 method='Scanner')
+					worker['status'] = 'busy'
+					worker['task'] = src_item
+					sleep = 0
+			# self._log(f"Send task: {src_item['file']} -> {worker['conf_dst']['name']}", logging.INFO, method='Scanner')
 		except StopEventException:
-			self.log("Stop event received, exiting worker thread.", logging.INFO, method='Worker')
+			self._log("Stop event received, exiting scanner thread.", logging.INFO, method='Scanner')
 			return
 		except Exception as e:
-			self.log("Exception in worker thread: {}".format(e), logging.ERROR, method='Worker')
-			self.log(traceback.format_exc(), logging.DEBUG, method='Worker')
+			self._log("Exception in scanner thread: {}".format(e), logging.ERROR, method='Scanner')
+			self._log(traceback.format_exc(), logging.DEBUG, method='Scanner')
+			pass
 
-	def file_move(self, src, dst, buffer_size=1024 ** 2):
+	# 工作线程
+	def _worker_thread(self, dst):
+		self._log("[{}] Worker thread started.".format(dst['name']), logging.INFO, method='Worker')
+		worker = self.workers[dst['dir'].resolve()]
+		with self.mutex:
+			worker['status'] = 'idle'
+		# 工作线程主逻辑开始
+		sleep = 0
+		last_check_time = None
+		while True:
+			try:
+				# 延迟
+				for _ in range(sleep):
+					self._check_stop_event()
+					time.sleep(1)
+				sleep = 1
+				# 检查磁盘空间
+				if last_check_time is None or time.time() - last_check_time > 60:
+					current_available_capacity = shutil.disk_usage(dst['dir']).free
+					estimated_available_capacity = current_available_capacity + sum(
+						(v.stat().st_size for v in dst['dir'].glob('*.plot') if
+						 v.is_file() and v.stat().st_mtime < self.conf_expiration_time))
+					with self.mutex:
+						worker['estimated_available_capacity'] = estimated_available_capacity
+					last_check_time = time.time()
+				# 检查是否有任务
+				with self.mutex:
+					if worker['status'] != 'busy' or worker['task'] is None:
+						continue
+					src_item = worker['task']
+				# 如果磁盘空间不足，删除过期文件
+				if current_available_capacity < src_item['size']:
+					for expired_file in (v for v in dst['dir'].glob('*.plot') if
+										 v.is_file() and v.stat().st_mtime < self.conf_expiration_time):
+						self._log("[{}] Removing expired file: {}, mtime: {}".format(
+							dst['name'],
+							expired_file.resolve(),
+							time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expired_file.stat().st_mtime))
+						), logging.INFO, method='Worker')
+						expired_file.unlink()
+						current_available_capacity = shutil.disk_usage(dst['dir']).free
+						if current_available_capacity >= src_item['size']:
+							break
+					if current_available_capacity < src_item['size']:
+						self._log("[{}] Not enough disk space, skip moving: {}".format(dst['name'], src_item['file']),
+								 logging.DEBUG, method='Worker')
+						with self.mutex:
+							worker['estimated_available_capacity'] = current_available_capacity + sum(
+								(v.stat().st_size for v in dst['dir'].glob('*.plot') if
+								 v.is_file() and v.stat().st_mtime < self.conf_expiration_time))
+							worker['task'] = None
+							worker['status'] = 'idle'
+						continue
+				# 开始移动
+				dst_file = dst['dir'] / ('.' + src_item['file'].name + '.moving')
+				self._file_move(src_item['file'], dst_file, dst['name'])
+				dst_file.rename(dst_file.parent / (dst_file.name[1:-7]))
+				# 更新磁盘空间
+				current_available_capacity -= src_item['size']
+				# 更新worker状态
+				with self.mutex:
+					worker['estimated_available_capacity'] -= src_item['size']
+					worker['task'] = None
+					worker['status'] = 'idle'
+			except StopEventException:
+				self._log("[{}] Stop event received, exiting worker thread.".format(dst['name']),
+						 logging.INFO, method='Worker')
+				return
+			except Exception as e:
+				self._log("[{}] Exception in worker thread: {}".format(dst['name'], e), logging.ERROR,
+						 method='Worker')
+				self._log(traceback.format_exc(), logging.DEBUG, method='Worker')
+				with self.mutex:
+					worker['task'] = None
+					worker['status'] = 'idle'
+				continue
+
+	def _file_move(self, src, dst, worker_name, buffer_size=1024 ** 2 * 8):
 		try:
 			if dst.is_file():
 				# 文件续传
-				self.log("Resume copying file: {} -> {}/".format(src.resolve(), dst.parent), method='Worker')
+				self._log("[{}] Resume copying file: {}".format(worker_name, src.resolve()), method='Worker')
 			else:
-				self.log("Start copying file: {} -> {}/".format(src.resolve(), dst.parent), method='Worker')
+				self._log("[{}] Start copying file: {}".format(worker_name, src.resolve()), method='Worker')
 			time_begin = datetime.now()
-			src_stat = os.stat(src.resolve())
+			move_size = 0
 			with open(src.resolve(), 'rb') as src_file, open(dst.resolve(), 'ab') as dst_file:
 				src_file.seek(dst_file.tell())
 				while True:
 					buf = src_file.read(buffer_size)
 					if buf:
 						dst_file.write(buf)
+						move_size += len(buf)
 					else:
 						break
-					self.check_stop_event()
-				# 复制文件属性和权限
-				shutil.copystat(src.resolve(), dst.resolve())
-				# 设置目标文件所有者和所属组
-				# os.chown(dst.resolve(), src_stat.st_uid, src_stat.st_gid)
-				# 删除源文件
-				self.log("Remove source file: {}".format(src.resolve()), level=logging.DEBUG, method='Worker')
-				src_path = src.resolve()
-				src.unlink()
-				time_complete = datetime.now()
-				use_time = self.usetime_to_text(time_begin, time_complete)
-				copy_speed = src_stat.st_size / 1024 ** 2 / (time_complete - time_begin).total_seconds()
-				self.log("File copying completed: {} -> {}/ , time used: {} ({} Mb/s)".format(
-					src_path, dst.parent, use_time, format(copy_speed, '0,.0f')
-				), method='Worker')
-		except StopEventException:
-			self.log("File copying stopped: {} -> {}".format(src.resolve(), dst.resolve()), method='Worker')
-		except Exception as e:
-			self.log("File copying failed: {} -> {}".format(src.resolve(), dst.resolve()), level=logging.ERROR,
+					self._check_stop_event()
+			# 复制文件属性和权限
+			shutil.copystat(src.resolve(), dst.resolve())
+			# 设置目标文件所有者和所属组
+			# os.chown(dst.resolve(), src_stat.st_uid, src_stat.st_gid)
+			# 删除源文件
+			self._log("[{}] Remove source file: {}".format(worker_name, src.resolve()), level=logging.DEBUG,
 					 method='Worker')
-			self.log("Error message: {}".format(e), level=logging.ERROR, method='Worker')
+			src_path = src.resolve()
+			src.unlink()
+			time_complete = datetime.now()
+			use_time = self._usetime_to_text(time_begin, time_complete)
+			copy_speed = move_size / (1024 ** 2) / (time_complete - time_begin).total_seconds()
+			self._log("[{}] File copying completed: {} , time used: {} ({} Mb/s)".format(
+				worker_name, src_path, use_time, format(copy_speed, '0,.0f')
+			), method='Worker')
+		except StopEventException:
+			self._log("[{}] File copying stopped: {}".format(worker_name, src.resolve()), method='Worker')
+			# if dst.is_file():
+			# 	self._log("[{}] Remove incomplete file: {}".format(worker_name, dst.resolve()), level=logging.DEBUG,
+			# 			 method='Worker')
+			# 	dst.unlink()
+			raise StopEventException
+		except Exception as e:
+			self._log("[{}] File copying failed: {}".format(worker_name, src.resolve()),
+					 level=logging.ERROR,
+					 method='Worker')
+			self._log("[{}] Error message: {}".format(worker_name, e), level=logging.ERROR, method='Worker')
+			raise e
 		return
 
 	# 将时间差转换为文本
-	def usetime_to_text(self, begin, end):
+	def _usetime_to_text(self, begin, end):
 		total = end - begin
 		days = total.days
 		hours = math.floor(total.seconds / 3600)
@@ -342,64 +440,65 @@ class Mover:
 					tmsg = str(days) + 'd' + tmsg
 		return tmsg
 
-	def get_filesystem_by_path(self, path):
-		sys_info = os.uname()
-		if sys_info.sysname == 'Linux':
-			cmd = ['findmnt', '-n', '-r', '-o', 'SOURCE', '-T', str(path)]
-			result = subprocess.check_output(cmd)
-			filesystem = result.decode().strip()
-		elif sys_info.sysname == 'Darwin':  # macOS
-			cmd = ['df', str(path)]
-			result = subprocess.check_output(cmd)
-			filesystem = result.decode().split('\n')[1].split()[0]
-		else:
-			raise Exception(f'Unsupported operating system: {sys_info.sysname}')
-		return filesystem
+	def _get_filesystem_by_path(self, path):
+		if str(path) not in self.filesystem_cache:
+			sys_info = os.uname()
+			if sys_info.sysname == 'Linux':
+				cmd = ['findmnt', '-n', '-r', '-o', 'SOURCE', '-T', str(path)]
+				result = subprocess.check_output(cmd)
+				filesystem = result.decode().strip()
+			elif sys_info.sysname == 'Darwin':  # macOS
+				cmd = ['df', str(path)]
+				result = subprocess.check_output(cmd)
+				filesystem = result.decode().split('\n')[1].split()[0]
+			else:
+				raise Exception(f'Unsupported operating system: {sys_info.sysname}')
+			self.filesystem_cache[str(path)] = filesystem
+		return self.filesystem_cache[str(path)]
 
 	# 日志函数
-	def log(self, message, level=logging.INFO, method='Main'):
-		if method:
-			message = "{} - {}".format(method, message)
+	def _log(self, message, level=logging.INFO, method='Main'):
 		if self.logger:
-			self.logger.log(level, message)
+			while True:
+				try:
+					data = self.log_message_queue.pop(0)
+					self.logger.log(level=data[0], msg=data[1])
+				except:
+					break
+			self.logger.log(level=level, msg="{} - {}".format(method, message))
 		else:
-			# 显示毫秒
-			print("{} - {} - {}".format(
-				datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-				logging.getLevelName(level),
-				message
-			))
+			self.log_message_queue.append((level, "{} - {}".format(method, message)))
+		return
 
 	# 信号处理函数
-	def signal_handler(self, signum, frame):
-		self.log("Signal received, signal: {}".format(signum), method='main')
+	def _signal_handler(self, signum, frame):
+		self._log("Signal received, signal: {}".format(signum))
 		self.stop_event.set()
 
 	# 检查是否收到停止信号
-	def check_stop_event(self, is_raise=True):
+	def _check_stop_event(self, is_raise=True):
 		if self.stop_event.is_set():
 			if is_raise:
-				self.log("Stop event received, exiting...", method='main')
 				raise StopEventException()
 			else:
 				return True
 		return False
 
 	# 创建进程锁文件
-	def lockfile_create(self):
+	def _lockfile_create(self):
 		try:
-			self.log("Creating lock file: {}".format(self.lock_file.resolve()), method='main')
-			with open(self.lock_file.resolve(), 'w') as f:
+			self._log("Creating lock file: {}".format(self.conf_lock_file.resolve()))
+			with open(self.conf_lock_file.resolve(), 'w') as f:
 				f.write(str(os.getpid()))
 		except Exception as e:
-			self.log("{}\n{}".format(sys.exc_info(), traceback.format_exc()), method='main', level=logging.ERROR)
+			self._log("{}\n{}".format(sys.exc_info(), traceback.format_exc()), level=logging.ERROR)
 			exit(1)
 
 	# 删除进程锁文件
-	def lockfile_delete(self):
+	def _lockfile_delete(self):
 		try:
-			self.log("Deleting lock file: {}".format(self.lock_file.resolve()), method='main')
-			self.lock_file.unlink()
+			self._log("Deleting lock file: {}".format(self.conf_lock_file.resolve()))
+			self.conf_lock_file.unlink()
 		except Exception as e:
 			pass
 
@@ -410,23 +509,7 @@ if __name__ == "__main__":
 	parser.add_argument('-f', '--config', required=True, help='Config file')
 	args = parser.parse_args()
 
-	# Logger
-	logger = logging.getLogger('chia-plot-mover')
-	logger.setLevel(logging.INFO)
-	# logger.setLevel(logging.DEBUG)
-	# STDOUT
-	stdout_handler = logging.StreamHandler(sys.stdout)
-	stdout_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-	logger.addHandler(stdout_handler)
-	# FILE
-	# file = logging.FileHandler(self.config['main']['log_dir'] + '/chia-plot-mover.log', 'a+', encoding="utf-8")
-	# file.setFormatter(formatter)
-	# logger.addHandler(file)
-	logger = logger
-	logger.info("chia-plot-mover was startup, PID: " + str(os.getpid()))
-
 	# Main
 	mover = Mover()
 	mover.set_config(args.config)
-	mover.set_logger(logger)
 	mover.run()
