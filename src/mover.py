@@ -45,11 +45,12 @@ class Mover:
 
         atexit.register(self._cleanup)
 
-        self._log("chia-plot-mover was startup, PID: " + str(os.getpid()))
+        self._log("Chia-Plot-Mover was startup, PID: " + str(os.getpid()))
         return
 
     def _cleanup(self):
         self._lockfile_delete()
+        self._log("Chia-Plot-Mover was shutdown, PID: " + str(os.getpid()))
         while True:
             try:
                 data = self.log_message_queue.pop(0)
@@ -148,7 +149,9 @@ class Mover:
     def _init_logger(self):
         logger = logging.getLogger('chia-plot-mover')
         # Log Level
-        log_level = logging.getLevelNamesMapping().get(self.conf_log_level, logging.INFO)
+        log_level = logging.getLevelName(self.conf_log_level)
+        if not isinstance(log_level, int):
+            log_level = logging.INFO
         logger.setLevel(log_level)
         self._log("Log level set to {}".format(logging.getLevelName(log_level)))
         # Handler
