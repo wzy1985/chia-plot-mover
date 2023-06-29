@@ -43,7 +43,7 @@ python3 mover.py --config=<config_file>
     
     // Optional
     // Log file path.
-    // Default: STDOUT
+    // Not setting this option will result in output to STDOUT.
     "log_file": "/tmp/mover.log",
     
     // Optional
