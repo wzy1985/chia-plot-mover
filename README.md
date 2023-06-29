@@ -6,11 +6,11 @@ If you have multiple hard drives, this little tool will automatically handle all
 
 ## Features
 
-* Supports multiple source directories 
-* Supports multiple destination directories 
-* Supports resuming from breakpoints 
-* Parallel processing of multiple destination directories 
-* Supports new plot replacement
+* Supports multiple source directories
+* Supports multiple destination directories
+* Supports resuming from breakpoints
+* Support automatic replacement of expired plot files after disk is full
+* Parallel processing of multiple destination directories
 
 ## Requirements
 

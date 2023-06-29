@@ -51,6 +51,7 @@ class Mover:
     def _cleanup(self):
         self._lockfile_delete()
         self._log("Chia-Plot-Mover was shutdown, PID: " + str(os.getpid()))
+        self._log("")
         while True:
             try:
                 data = self.log_message_queue.pop(0)
@@ -65,13 +66,13 @@ class Mover:
 
     # 开始运行
     def run(self):
-        # Lockfile
-        self._lockfile_create()
-
         # 检查是否已经加载配置
         if not self.conf_lock_file:
             self._log("Configuration not loaded, exiting...", logging.ERROR)
             return
+
+        # Lockfile
+        self._lockfile_create()
 
         # 创建工作线程
         for dst in self.conf_dst:
@@ -302,7 +303,7 @@ class Mover:
 
     # 工作线程
     def _worker_thread(self, dst):
-        self._log("[{}] Worker thread started.".format(dst['name']), logging.INFO, method='Worker')
+        self._log("{} - Worker thread started.".format(dst['name']), logging.INFO, method='Worker')
         worker = self.workers[dst['dir'].resolve()]
         with self.mutex:
             worker['status'] = 'idle'
@@ -334,7 +335,7 @@ class Mover:
                 if current_available_capacity < src_item['size']:
                     for expired_file in (v for v in dst['dir'].glob('*.plot') if
                                          v.is_file() and v.stat().st_mtime < self.conf_expiration_time):
-                        self._log("[{}] Removing expired file: {}, mtime: {}".format(
+                        self._log("{} - Removing expired file: {}, mtime: {}".format(
                             dst['name'],
                             expired_file.resolve(),
                             time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expired_file.stat().st_mtime))
@@ -344,7 +345,7 @@ class Mover:
                         if current_available_capacity >= src_item['size']:
                             break
                     if current_available_capacity < src_item['size']:
-                        self._log("[{}] Not enough disk space, skip moving: {}".format(dst['name'], src_item['file']),
+                        self._log("{} - Not enough disk space, skip moving: {}".format(dst['name'], src_item['file']),
                                   logging.DEBUG, method='Worker')
                         with self.mutex:
                             worker['estimated_available_capacity'] = current_available_capacity + sum(
@@ -365,11 +366,11 @@ class Mover:
                     worker['task'] = None
                     worker['status'] = 'idle'
             except StopEventException:
-                self._log("[{}] Stop event received, exiting worker thread.".format(dst['name']),
+                self._log("{} - Stop event received, exiting worker thread.".format(dst['name']),
                           logging.INFO, method='Worker')
                 return
             except Exception as e:
-                self._log("[{}] Exception in worker thread: {}".format(dst['name'], e), logging.ERROR,
+                self._log("{} - Exception in worker thread: {}".format(dst['name'], e), logging.ERROR,
                           method='Worker')
                 self._log(traceback.format_exc(), logging.DEBUG, method='Worker')
                 with self.mutex:
@@ -381,9 +382,9 @@ class Mover:
         try:
             if dst.is_file():
                 # 文件续传
-                self._log("[{}] Resume copying file: {}".format(worker_name, src.resolve()), method='Worker')
+                self._log("{} - Resume copying file: {}".format(worker_name, src.resolve()), method='Worker')
             else:
-                self._log("[{}] Start copying file: {}".format(worker_name, src.resolve()), method='Worker')
+                self._log("{} - Start copying file: {}".format(worker_name, src.resolve()), method='Worker')
             time_begin = datetime.now()
             move_size = 0
             with open(src.resolve(), 'rb') as src_file, open(dst.resolve(), 'ab') as dst_file:
@@ -401,28 +402,28 @@ class Mover:
             # 设置目标文件所有者和所属组
             # os.chown(dst.resolve(), src_stat.st_uid, src_stat.st_gid)
             # 删除源文件
-            self._log("[{}] Remove source file: {}".format(worker_name, src.resolve()), level=logging.DEBUG,
+            self._log("{} - Remove source file: {}".format(worker_name, src.resolve()), level=logging.DEBUG,
                       method='Worker')
             src_path = src.resolve()
             src.unlink()
             time_complete = datetime.now()
             use_time = self._usetime_to_text(time_begin, time_complete)
             copy_speed = move_size / (1024 ** 2) / (time_complete - time_begin).total_seconds()
-            self._log("[{}] File copying completed: {} , time used: {} ({} Mb/s)".format(
+            self._log("{} - File copying completed: {} , time used: {} ({} Mb/s)".format(
                 worker_name, src_path, use_time, format(copy_speed, '0,.0f')
             ), method='Worker')
         except StopEventException:
-            self._log("[{}] File copying stopped: {}".format(worker_name, src.resolve()), method='Worker')
+            self._log("{} - File copying stopped: {}".format(worker_name, src.resolve()), method='Worker')
             # if dst.is_file():
-            # 	self._log("[{}] Remove incomplete file: {}".format(worker_name, dst.resolve()), level=logging.DEBUG,
+            # 	self._log("{} - Remove incomplete file: {}".format(worker_name, dst.resolve()), level=logging.DEBUG,
             # 			 method='Worker')
             # 	dst.unlink()
             raise StopEventException
         except Exception as e:
-            self._log("[{}] File copying failed: {}".format(worker_name, src.resolve()),
+            self._log("{} - File copying failed: {}".format(worker_name, src.resolve()),
                       level=logging.ERROR,
                       method='Worker')
-            self._log("[{}] Error message: {}".format(worker_name, e), level=logging.ERROR, method='Worker')
+            self._log("{} - Error message: {}".format(worker_name, e), level=logging.ERROR, method='Worker')
             raise e
         return
 
