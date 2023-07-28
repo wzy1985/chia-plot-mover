@@ -446,11 +446,11 @@ class Mover:
     def _get_filesystem_by_path(self, path):
         if str(path) not in self.filesystem_cache:
             sys_info = os.uname()
-            if sys_info.sysname == 'Linux':
-                cmd = ['findmnt', '-n', '-r', '-o', 'SOURCE', '-T', str(path)]
-                result = subprocess.check_output(cmd)
-                filesystem = result.decode().strip()
-            elif sys_info.sysname == 'Darwin':  # macOS
+            # if sys_info.sysname == 'Linux':
+            #     cmd = ['findmnt', '-n', '-r', '-o', 'SOURCE', '-T', str(path)]
+            #     result = subprocess.check_output(cmd)
+            #     filesystem = result.decode().strip()
+            if sys_info.sysname in ['Linux', 'Darwin']:
                 cmd = ['df', str(path)]
                 result = subprocess.check_output(cmd)
                 filesystem = result.decode().split('\n')[1].split()[0]
