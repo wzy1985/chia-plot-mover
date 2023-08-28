@@ -409,7 +409,7 @@ class Mover:
             time_complete = datetime.now()
             use_time = self._usetime_to_text(time_begin, time_complete)
             copy_speed = move_size / (1024 ** 2) / (time_complete - time_begin).total_seconds()
-            self._log("{} - File copying completed: {} , time used: {} ({} Mb/s)".format(
+            self._log("{} - File copying completed: {} , time used: {} ({} MB/s)".format(
                 worker_name, src_path, use_time, format(copy_speed, '0,.0f')
             ), method='Worker')
         except StopEventException:
